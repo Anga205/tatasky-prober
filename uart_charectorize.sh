@@ -1,20 +1,42 @@
 #!/usr/bin/env bash
-set -u
+# uart_charectorize.sh — passive UART framing/baud scanner
+# Usage: ./uart_charectorize.sh [DEVICE] [SECONDS] [FORMATS]
+# Example: ./uart_charectorize.sh /dev/ttyUSB0 3
 
-DEV="${1:-/dev/ttyUSB0}"
-SECONDS_TO_TEST="${2:-3}"
-OUT="uart_scan_$(date +%Y%m%d_%H%M%S)"
+set -uo pipefail
 
-BAUDS=(1200 2400 4800 9600 19200 38400 57600 115200)
-FORMATS=("cs8 -parenb -cstopb" "cs8 parenb -cstopb" "cs8 parenb cstopb")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config/defaults.conf" 2>/dev/null || true
+source "$SCRIPT_DIR/lib/log.sh" 2>/dev/null || true
+source "$SCRIPT_DIR/lib/analyze.sh" 2>/dev/null || true
 
-[[ -e "$DEV" ]] || {
-    echo "Device not found: $DEV"
-    exit 1
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [DEVICE] [SECONDS] [FORMATS]
+  DEVICE     UART device (default: $DEFAULT_DEV)
+  SECONDS    Duration per config (default: 3)
+  FORMATS    Space-separated stty format strings (optional)
+
+Safety: TX is NEVER used. Only passive receive.
+Dependencies: stty, dd, timeout, xxd, tr, wc
+EOF
 }
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+
+DEV="${1:-$DEFAULT_DEV}"
+SECONDS_TO_TEST="${2:-3}"
+FORMATS=(${3:-"cs8 -parenb -cstopb" "cs8 parenb -cstopb" "cs8 parenb cstopb"})
+
+[[ -e "$DEV" ]] || { echo "Device not found: $DEV"; exit 1; }
+[[ "$SECONDS_TO_TEST" =~ ^[0-9]+$ ]] || { echo "Invalid seconds"; exit 1; }
+
+OUT="uart_scan_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
+BAUDS=(1200 2400 4800 9600 19200 38400 57600 115200)
+
+log_info "Passive framing scan start: $DEV duration=${SECONDS_TO_TEST}s"
 echo "UART passive scanner"
 echo "Device: $DEV"
 echo "Duration: ${SECONDS_TO_TEST}s/configuration"
@@ -25,18 +47,7 @@ echo
 
 score_file() {
     local f="$1"
-    local bytes printable nulls
-    bytes=$(wc -c < "$f")
-
-    (( bytes == 0 )) && {
-        echo "0"
-        return
-    }
-
-    printable=$(LC_ALL=C tr -cd '[:print:][:space:]' < "$f" | wc -c)
-    nulls=$(LC_ALL=C tr -cd '\000' < "$f" | wc -c)
-
-    echo $(( printable * 100 / bytes - nulls * 50 / bytes ))
+    analyze_file "$f"
 }
 
 for baud in "${BAUDS[@]}"; do
@@ -63,7 +74,7 @@ for baud in "${BAUDS[@]}"; do
             2>/dev/null || true
 
         bytes=$(wc -c < "$file")
-        score=$(score_file "$file")
+        score=$(analyze_file "$file")
 
         if (( bytes > 0 )); then
             echo "    ${bytes} bytes, score=${score}"
@@ -86,12 +97,11 @@ echo "=== Candidate configurations ==="
 
 for f in "$OUT"/*.bin; do
     [[ -s "$f" ]] || continue
-
-    score=$(score_file "$f")
+    score=$(analyze_file "$f")
     bytes=$(wc -c < "$f")
-
     printf '%8s  score=%4s  %s\n' "$bytes" "$score" "$(basename "$f")"
 done | sort -k2,2nr
 
 echo
 echo "Captures saved under: $OUT/"
+log_info "Passive framing scan complete: $OUT"

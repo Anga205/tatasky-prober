@@ -1,25 +1,52 @@
 #!/usr/bin/env bash
-set -u
+# protocol_probe.sh — conservative single-byte TX probe
+# Usage: ./protocol_probe.sh [DEVICE] [BAUD] [PROBE_LIST]
+# Example: ./protocol_probe.sh /dev/ttyUSB0 115200 "00 55 AA"
 
-DEV="${1:-/dev/ttyUSB0}"
-BAUD="${2:-115200}"
-OUT="uart_probe_$(date +%Y%m%d_%H%M%S)"
+set -uo pipefail
 
-PROBES=(00 55 AA FF 7F 20 0D 0A)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config/defaults.conf" 2>/dev/null || true
+source "$SCRIPT_DIR/lib/log.sh" 2>/dev/null || true
 
-mkdir -p "$OUT"
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [DEVICE] [BAUD] [PROBE_LIST]
+  DEVICE     UART device (default: $DEFAULT_DEV)
+  BAUD       Baud rate (default: $DEFAULT_BAUD)
+  PROBE_LIST Space-separated hex bytes (default: $DEFAULT_PROBE_BYTES)
 
-[[ -e "$DEV" ]] || {
-    echo "Device not found: $DEV"
-    exit 1
+Safety: TX is bounded to ${MAX_PROBE_BYTES} bytes. No destructive ops.
+Dependencies: stty, dd, printf, xxd, date
+EOF
 }
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+
+DEV="${1:-$DEFAULT_DEV}"
+BAUD="${2:-$DEFAULT_BAUD}"
+PROBES=(${3:-$DEFAULT_PROBE_BYTES})
+
+# Validation
+command -v stty >/dev/null || { echo "stty missing"; exit 1; }
+[[ -e "$DEV" ]] || { echo "Device not found: $DEV"; exit 1; }
+[[ "$BAUD" =~ ^[0-9]+$ ]] || { echo "Invalid baud"; exit 1; }
+
+if (( ${#PROBES[@]} > MAX_PROBE_BYTES )); then
+    echo "Too many probes (${#PROBES[@]} > $MAX_PROBE_BYTES). Aborting."
+    exit 1
+fi
+
+OUT="uart_probe_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUT"
+
+log_info "Controlled probe start: $DEV baud=$BAUD probes=${#PROBES[@]}"
 echo "UART controlled probe"
 echo "Device : $DEV"
 echo "Baud   : $BAUD"
 echo "Output : $OUT"
 echo
-echo "TX will be limited to ${#PROBES[@]} single-byte probes."
+echo "TX will be limited to ${#PROBES[@]} single-byte probes (max $MAX_PROBE_BYTES)."
 echo
 
 stty -F "$DEV" "$BAUD" cs8 -parenb -cstopb \
@@ -36,6 +63,7 @@ for hex in "${PROBES[@]}"; do
         iflag=nonblock status=none 2>/dev/null || true
 
     printf '[TX] %s  ' "$hex"
+    log_tx "$hex"
 
     cat "$tx" > "$DEV"
 
@@ -46,7 +74,8 @@ for hex in "${PROBES[@]}"; do
 
     if (( bytes )); then
         printf '[RX] %d bytes\n' "$bytes"
-        xxd -g1 "$rx"
+        log_rx "$bytes"
+        xxd -g1 "$rx" || true
     else
         echo "[RX] none"
     fi
